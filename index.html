@@ -64,6 +64,38 @@ body {
 #rotate p { margin: 0; font-size: 20px; max-width: 16em; text-wrap: balance; }
 #rotate svg { width: 84px; height: 84px; }
 @media (orientation: portrait) and (pointer: coarse) { #rotate { display: flex; } }
+/* Password gate of a locked build (PLAY_PASS): only the form takes text and taps. */
+#gate { display: grid; gap: 8px; }
+#gate[hidden], .bar[hidden] { display: none; }
+#gate label { font-size: 15px; color: var(--dim); }
+#gate input[type="password"] {
+	font: inherit;
+	font-size: 18px;
+	padding: 8px 10px;
+	color: var(--text);
+	background: var(--night);
+	border: 2px solid var(--edge);
+	border-radius: 6px;
+	-webkit-user-select: text;
+	user-select: text;
+	touch-action: manipulation;
+}
+#gate input[type="password"]:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+#gate .check { display: flex; align-items: center; gap: 8px; touch-action: manipulation; }
+#gate .check input { width: 20px; height: 20px; margin: 0; accent-color: var(--leaf); }
+#gate button {
+	font: inherit;
+	font-size: 20px;
+	font-weight: 700;
+	padding: 8px;
+	color: var(--text);
+	background: var(--leaf);
+	border: 2px solid #0c0501;
+	border-radius: 6px;
+	box-shadow: 0 2px 0 #0c0501;
+	touch-action: manipulation;
+}
+#gate button:active { transform: translateY(1px); box-shadow: 0 1px 0 #0c0501; }
 @media (prefers-reduced-motion: no-preference) {
 	#rotate svg { animation: tilt 2.4s ease-in-out infinite; }
 	@keyframes tilt { 0%, 30% { transform: rotate(0deg); } 60%, 100% { transform: rotate(-90deg); } }
@@ -75,8 +107,14 @@ body {
 <div id="loading" class="overlay" role="status">
 	<div class="card">
 		<div class="name">Timberbrook</div>
-		<div class="sub">Loading the village. Play with your phone held sideways; your village is saved in this browser.</div>
-		<div class="bar"><span id="fill"></span></div>
+		<div class="sub" id="sub">Loading the village. Play with your phone held sideways; your village is saved in this browser.</div>
+		<form id="gate" hidden>
+			<label for="pass">Private test build. Password · Mật khẩu</label>
+			<input id="pass" type="password" autocomplete="current-password" enterkeyhint="go" required>
+			<label class="check"><input id="remember" type="checkbox" checked> Remember on this device</label>
+			<button type="submit">Play</button>
+		</form>
+		<div class="bar" id="bar"><span id="fill"></span></div>
 		<div id="note">Starting…</div>
 	</div>
 </div>
@@ -90,13 +128,20 @@ body {
 </div>
 
 <script>
+// `pack`: the unlocked game pack of a locked build (set by the password gate below);
+// `fetch`: the browser's own fetch.
+const TB = { pack: null, fetch: window.fetch.bind(window) };
+
 // The engine (index.wasm, ~40 MB) is published gzip'd as index-gz.wasm. Unpack it in the
 // browser when Godot asks for it; a host that already unpacked it is fine too (the gzip
-// magic bytes decide).
+// magic bytes decide). A locked build's game pack comes from memory, already decrypted.
 (function () {
-	const plainFetch = window.fetch.bind(window);
+	const plainFetch = TB.fetch;
 	window.fetch = async function (input, init) {
 		const url = typeof input === 'string' ? input : input.url;
+		if (TB.pack && /index-pck\.wasm(\?|$)/.test(url)) {
+			return new Response(TB.pack, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } });
+		}
 		if (!/index\.wasm(\?|$)/.test(url)) {
 			return plainFetch(input, init);
 		}
@@ -154,7 +199,10 @@ body {
 <script src="index.js"></script>
 <script>
 (function () {
-	const GODOT_CONFIG = {"args": [], "canvasResizePolicy": 0, "emscriptenPoolSize": 8, "ensureCrossOriginIsolationHeaders": true, "executable": "index", "experimentalVK": false, "fileSizes": {"index.wasm": 39514754, "index-pck.wasm": 720248}, "focusCanvas": true, "gdextensionLibs": [], "godotPoolSize": 4, "serviceWorker": "", "mainPack": "index-pck.wasm"};
+	const GODOT_CONFIG = {"args": [], "canvasResizePolicy": 0, "emscriptenPoolSize": 8, "ensureCrossOriginIsolationHeaders": true, "executable": "index", "experimentalVK": false, "fileSizes": {"index.wasm": 39514754, "index-pck.wasm": 913964}, "focusCanvas": true, "gdextensionLibs": [], "godotPoolSize": 4, "serviceWorker": "", "mainPack": "index-pck.wasm"};
+	// {"iter": PBKDF2 rounds} when the game pack is encrypted (PLAY_PASS), else null
+	const LOCK = {"iter": 150000};
+	const PASS_KEY = 'timberbrook-pass';
 	const loading = document.getElementById('loading');
 	const fill = document.getElementById('fill');
 	const note = document.getElementById('note');
@@ -174,19 +222,139 @@ body {
 		fail(new Error('This browser is missing: ' + missing.join(', ')));
 		return;
 	}
-	const engine = new Engine(GODOT_CONFIG);
-	engine.startGame({
-		onProgress: function (current, total) {
-			if (current > 0 && total > 0) {
-				const pct = Math.min(100, Math.round(current / total * 100));
-				fill.style.width = pct + '%';
-				note.textContent = 'Loading ' + pct + '%';
+
+	function start() {
+		const engine = new Engine(GODOT_CONFIG);
+		engine.startGame({
+			onProgress: function (current, total) {
+				if (current > 0 && total > 0) {
+					const pct = Math.min(100, Math.round(current / total * 100));
+					fill.style.width = pct + '%';
+					note.textContent = 'Loading ' + pct + '%';
+				}
+			},
+		}).then(function () {
+			loading.remove();
+			document.getElementById('canvas').focus();
+		}, fail);
+	}
+
+	if (!LOCK) {
+		start();
+		return;
+	}
+
+	// Locked build: the game pack is `openssl enc -aes-256-cbc -pbkdf2` output ("Salted__",
+	// 8 bytes of salt, then the ciphertext; key and IV are 48 bytes of PBKDF2-SHA256). A
+	// wrong password fails the padding check or doesn't give a Godot pack ("GDPC").
+	const gate = document.getElementById('gate');
+	const pass = document.getElementById('pass');
+	const remember = document.getElementById('remember');
+	const bar = document.getElementById('bar');
+	let sealed = null;
+
+	async function sealedPack() {
+		if (!sealed) {
+			const res = await TB.fetch(GODOT_CONFIG.mainPack, { cache: 'no-cache' });
+			if (!res.ok) {
+				throw new Error('The game pack did not load (HTTP ' + res.status + ').');
 			}
-		},
-	}).then(function () {
-		loading.remove();
-		document.getElementById('canvas').focus();
-	}, fail);
+			sealed = new Uint8Array(await res.arrayBuffer());
+		}
+		return sealed;
+	}
+
+	async function unlock(password) {
+		if (!window.crypto || !crypto.subtle) {
+			throw new Error('This page needs a secure (https) connection.');
+		}
+		const data = await sealedPack();
+		if (data.length < 32 || new TextDecoder().decode(data.subarray(0, 8)) !== 'Salted__') {
+			throw new Error('The game pack is not in the locked format.');
+		}
+		const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+		const bits = new Uint8Array(await crypto.subtle.deriveBits(
+			{ name: 'PBKDF2', salt: data.subarray(8, 16), iterations: LOCK.iter, hash: 'SHA-256' }, base, 384));
+		const key = await crypto.subtle.importKey('raw', bits.subarray(0, 32), 'AES-CBC', false, ['decrypt']);
+		let plain;
+		try {
+			plain = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: bits.subarray(32, 48) }, key, data.subarray(16));
+		} catch (err) {
+			return null;
+		}
+		const magic = new Uint8Array(plain, 0, Math.min(4, plain.byteLength));
+		return String.fromCharCode.apply(null, magic) === 'GDPC' ? plain : null;
+	}
+
+	function remembered() {
+		try {
+			return localStorage.getItem(PASS_KEY) || '';
+		} catch (err) {
+			return '';
+		}
+	}
+
+	function keep(password) {
+		try {
+			if (password) {
+				localStorage.setItem(PASS_KEY, password);
+			} else {
+				localStorage.removeItem(PASS_KEY);
+			}
+		} catch (err) {
+			// private window or blocked storage: just ask again next time
+		}
+	}
+
+	function ask() {
+		gate.hidden = false;
+		bar.hidden = true;
+		document.getElementById('sub').hidden = true;
+		pass.focus();
+	}
+
+	async function tryPassword(password, quiet) {
+		note.classList.remove('error');
+		note.textContent = 'Checking…';
+		let plain;
+		try {
+			plain = await unlock(password);
+		} catch (err) {
+			fail(err);
+			return;
+		}
+		if (!plain) {
+			if (quiet) {
+				keep('');
+				note.textContent = '';
+				ask();
+			} else {
+				note.classList.add('error');
+				note.textContent = 'Wrong password · Sai mật khẩu';
+				pass.select();
+			}
+			return;
+		}
+		TB.pack = plain;
+		keep(quiet || remember.checked ? password : '');
+		gate.hidden = true;
+		bar.hidden = false;
+		document.getElementById('sub').hidden = false;
+		note.textContent = 'Starting…';
+		start();
+	}
+
+	gate.addEventListener('submit', function (ev) {
+		ev.preventDefault();
+		tryPassword(pass.value, false);
+	});
+	const saved = remembered();
+	if (saved) {
+		tryPassword(saved, true);
+	} else {
+		note.textContent = '';
+		ask();
+	}
 }());
 </script>
 </body></html>
